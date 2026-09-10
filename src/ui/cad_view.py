@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
+    QGraphicsItem,
     QGraphicsPathItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -40,6 +41,8 @@ class CadGraphicsView(QGraphicsView):
         self._window_overlays: list[QGraphicsPathItem] = []
         self._door_overlays: list[QGraphicsPathItem] = []
         self._wall_overlays: list[QGraphicsPathItem] = []
+        self._confirmed_floor_labels: dict[tuple[float, float, float, float], QGraphicsSimpleTextItem] = {}
+        self._floor_label_item: QGraphicsSimpleTextItem | None = None
 
         self._plan_select_mode = False
         self._plan_start: QPointF | None = None
@@ -52,10 +55,12 @@ class CadGraphicsView(QGraphicsView):
         self._document = document
         scene = self.scene()
         scene.clear()
+        self._confirmed_floor_labels = {}
 
         self._window_overlays = []
         self._door_overlays = []
         self._wall_overlays = []
+        self._floor_label_item = None
         self._plan_select_mode = False
         self._plan_start = None
         self._plan_preview = None
@@ -110,6 +115,84 @@ class CadGraphicsView(QGraphicsView):
             pad = max(rect.width(), rect.height()) * 0.02
             scene.setSceneRect(rect.adjusted(-pad, -pad, pad, pad))
             self.fit_all()
+
+    def set_floor_label(self, text: str) -> None:
+        """
+        Secili kat adini plan geometrisinin altinda gosterir.
+
+        Bu sadece UI etiketidir.
+        CAD primitive'i veya Max export geometrisi degildir.
+        """
+
+        scene = self.scene()
+
+        if self._floor_label_item is not None:
+            if self._floor_label_item.scene() is not None:
+                scene.removeItem(self._floor_label_item)
+
+            self._floor_label_item = None
+
+        text = str(text or "").strip()
+
+        if not text:
+            return
+
+        geometry_items = [
+            item
+            for item in scene.items()
+            if isinstance(item, QGraphicsPathItem)
+            and item not in self._wall_overlays
+            and item not in self._door_overlays
+            and item not in self._window_overlays
+        ]
+
+        if geometry_items:
+            rect = geometry_items[0].sceneBoundingRect()
+
+            for item in geometry_items[1:]:
+                rect = rect.united(
+                    item.sceneBoundingRect()
+                )
+        else:
+            rect = scene.itemsBoundingRect()
+
+        if rect.isNull():
+            return
+
+        label = QGraphicsSimpleTextItem(text)
+
+        font = QFont("Arial")
+        font.setBold(True)
+        font.setPointSize(12)
+
+        label.setFont(font)
+        label.setBrush(
+            QColor("#f0f0f0")
+        )
+        label.setZValue(2000000)
+
+        label_rect = label.boundingRect()
+
+        gap = max(
+            rect.height() * 0.025,
+            label_rect.height() * 0.75,
+        )
+
+        x = (
+            rect.center().x()
+            - label_rect.width() * 0.5
+        )
+
+        y = (
+            rect.bottom()
+            + gap
+        )
+
+        label.setPos(x, y)
+
+        scene.addItem(label)
+        self._floor_label_item = label
+
 
     def begin_plan_selection(self) -> None:
         if self._document is None:
@@ -353,7 +436,102 @@ class CadGraphicsView(QGraphicsView):
             if item.__class__.__name__ == "QGraphicsPathItem":
                 item.setVisible(False)
 
+    def set_confirmed_floor_label(
+        self,
+        bounds,
+        floor_name: str,
+    ) -> None:
+        """
+        Onaylanan kat adini, secilen kat planinin altinda gosterir.
+        Bu bir UI etiketidir; CAD geometrisine dahil edilmez.
+        """
+
+        if not bounds or len(bounds) != 4:
+            return
+
+        xmin, ymin, xmax, ymax = (
+            float(value)
+            for value in bounds
+        )
+
+        key = (
+            round(xmin, 6),
+            round(ymin, 6),
+            round(xmax, 6),
+            round(ymax, 6),
+        )
+
+        scene = self.scene()
+
+        old_item = self._confirmed_floor_labels.get(key)
+
+        if old_item is not None:
+            try:
+                if old_item.scene() is scene:
+                    scene.removeItem(old_item)
+            except RuntimeError:
+                pass
+
+        label = QGraphicsSimpleTextItem(
+            str(floor_name).strip()
+        )
+
+        font = QFont("Arial")
+        font.setPointSize(11)
+        font.setBold(True)
+
+        label.setFont(font)
+        label.setBrush(QColor("#ffffff"))
+
+        # Zoom seviyesinden bagimsiz okunabilir kalsin.
+        label.setFlag(
+            QGraphicsItem.ItemIgnoresTransformations,
+            True,
+        )
+
+        label.setZValue(3000000)
+
+        center_x = (xmin + xmax) * 0.5
+
+        # CAD view Y eksenini ters ciziyor.
+        # CAD ymin, ekrandaki planin alt kenaridir.
+        scene_bottom_y = -ymin
+
+        plan_height = abs(ymax - ymin)
+        gap = max(plan_height * 0.015, 1.0)
+
+        # Yazinin kendi genisligini hesaba katarak
+        # planin altinda tam ortala.
+        label_rect = label.boundingRect()
+        label_x = center_x - (label_rect.width() * 0.5)
+
+        label.setPos(
+            label_x,
+            scene_bottom_y + gap,
+        )
+
+        scene.addItem(label)
+
+        self._confirmed_floor_labels[key] = label
+
+
+    def clear_confirmed_floor_labels(self) -> None:
+        scene = self.scene()
+
+        for item in tuple(
+            self._confirmed_floor_labels.values()
+        ):
+            try:
+                if item.scene() is scene:
+                    scene.removeItem(item)
+            except RuntimeError:
+                pass
+
+        self._confirmed_floor_labels = {}
+
+
     def clear_document(self) -> None:
+        self._confirmed_floor_labels = {}
         self._document = None
         self._plan_cleanup_active = False
         self.scene().clear()
