@@ -1,0 +1,26 @@
+﻿3Dcad PHYSICAL CHECKPOINT
+=========================
+
+Checkpoint:
+WALL_RULES_WORKING_20260910_143739
+
+Created:
+2026-09-10 14:37:39
+
+Project root:
+C:\Users\yildi\Desktop\3Dcad
+
+Authoritative state:
+- Door selection ACTIVE
+- Window selection ACTIVE
+- DWG fresh reload fix ACTIVE
+- Current wall layer rules ACTIVE
+- Current endpoint continuity rules ACTIVE
+- Synthetic parallel open-end connector system ACTIVE
+- Last single-open-end rejection rule CANCELLED / ABSENT
+- Do not restore the cancelled single-open-end rejection rule
+
+Git:
+main
+bf5d357576f2859e802909a8cc38666abbadf1d7
+
