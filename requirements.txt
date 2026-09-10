@@ -1,0 +1,3 @@
+PySide6>=6.8,<7
+ezdxf>=1.4,<2
+pywin32>=308; platform_system == "Windows"

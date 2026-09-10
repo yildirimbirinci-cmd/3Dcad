@@ -1,0 +1,14 @@
+{
+  "theme": "dark",
+  "cad": {
+    "dwg_converter": "autocad_com",
+    "dxf_version": "R2018",
+    "curve_flattening_distance": 0.5
+  },
+  "view": {
+    "background": "#15181d",
+    "major_grid": "#252a31",
+    "minor_grid": "#1d2228",
+    "default_line": "#d7dde7"
+  }
+}

@@ -1,0 +1,9 @@
+3Dcad CHECKPOINT
+Created: 2026-09-09 10:11:58
+Status: WORKING
+Confirmed by user:
+- Interior door selection works
+- Window selection works
+
+Authoritative continuation point.
+Do not re-test or modify these working selections unless explicitly requested.
