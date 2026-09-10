@@ -17,3 +17,8 @@ data/output/*
 checkpoints/**/data/input/*
 checkpoints/**/data/temp/*
 checkpoints/**/data/output/*
+
+# Local checkpoints and runtime cache
+checkpoints/
+data/cache/
+*_DIFF.txt
