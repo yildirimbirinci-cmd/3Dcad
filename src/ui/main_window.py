@@ -45,8 +45,12 @@ class MainWindow(QMainWindow):
         self._plan_view_active = False
         self._confirmed_floors = []
         self._build_ui()
+        self._apply_main_menu_disabled_text_style()
         self._setup_building_elements_menu()
+        self._install_global_button_click_glow()
         self._set_plan_tool_buttons_visible(False)
+        self._set_cad_menu_mode(False)
+        self._set_main_cad_action_buttons_enabled(False)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -76,8 +80,9 @@ class MainWindow(QMainWindow):
         self.view.plan_area_selected.connect(self._apply_plan_selection)
 
         load_btn = QPushButton("Mimari CAD Ekle")
+        self._cad_menu_button = load_btn
         load_btn.setObjectName("primary")
-        load_btn.clicked.connect(self.open_cad)
+        load_btn.clicked.connect(self._handle_cad_menu_button)
 
         self.plan_btn = QPushButton("Plan Seç")
         self.plan_btn.setEnabled(False)
@@ -105,6 +110,10 @@ class MainWindow(QMainWindow):
         clear_btn.clicked.connect(self.clear_cad)
 
         self.generate_3d_btn = QPushButton("3D Oluştur")
+
+        self._create_3d_button = self.generate_3d_btn
+
+        self.generate_3d_btn.setVisible(False)
         self.generate_3d_btn.setObjectName("primary")
         self.generate_3d_btn.setEnabled(False)
         self.generate_3d_btn.clicked.connect(self._create_3d)
@@ -736,9 +745,6 @@ class MainWindow(QMainWindow):
             animation_group
         )
 
-        self._install_building_element_button_glow(
-            (toggle, *buttons)
-        )
 
         toggle.clicked.connect(
             self._toggle_building_elements_menu
@@ -752,196 +758,292 @@ class MainWindow(QMainWindow):
             f"submenu={submenu_height} | clip={clip_height}"
         )
 
-    def _install_building_element_button_glow(
-        self,
-        buttons,
-    ) -> None:
+
+
+
+
+    def _install_global_button_click_glow(self) -> None:
         """
-        Yapi Elemanlari grubuna:
-        - normal durumda 1 px mavi border
-        - click sonrasi yavas sonen mavi glow
-        ekler.
+        Tum QPushButton nesnelerine ayni click glow uygulanir.
 
-        Button geometry/layout ve mevcut signal'lar degismez.
-        """
+        Glow button SINIRLARI ICINDE cizilir.
+        Bu nedenle parent/container tarafindan kirpilmaz.
 
-        from PySide6.QtGui import QColor
-        from PySide6.QtWidgets import QGraphicsDropShadowEffect
-
-        blue = "#2F80FF"
-
-        self._building_element_glow_effects = {}
-        self._building_element_glow_animations = {}
-
-        for button in buttons:
-
-            current_style = button.styleSheet() or ""
-
-            blue_border = f"""
-QPushButton {{
-    border: 1px solid {blue};
-}}
-"""
-
-            # Ayni runtime icinde iki kez eklenmesin.
-            if blue_border.strip() not in current_style:
-                button.setStyleSheet(
-                    current_style
-                    + "\n"
-                    + blue_border
-                )
-
-            effect = QGraphicsDropShadowEffect(button)
-
-            effect.setOffset(0, 0)
-
-            # Glow icin hazir ama normal durumda transparan.
-            effect.setBlurRadius(16.0)
-            effect.setColor(
-                QColor(
-                    47,
-                    128,
-                    255,
-                    0,
-                )
-            )
-
-            button.setGraphicsEffect(effect)
-
-            self._building_element_glow_effects[
-                button
-            ] = effect
-
-            button.clicked.connect(
-                lambda checked=False, b=button:
-                    self._pulse_building_element_button(b)
-            )
-
-
-    def _pulse_building_element_button(
-        self,
-        button,
-    ) -> None:
-        """
-        Tiklanan button glowunu yakar ve
-        1200 ms icinde yavasca sondurur.
+        Normal durumda efekt gorunmez.
         """
 
         from PySide6.QtCore import (
+            QEvent,
+            Property,
+            QRectF,
+            Qt,
+        )
+        from PySide6.QtGui import (
+            QColor,
+            QPainter,
+            QPen,
+        )
+        from PySide6.QtWidgets import (
+            QPushButton,
+            QWidget,
+        )
+
+        class _ButtonGlowOverlay(QWidget):
+
+            def __init__(self, button):
+                super().__init__(button)
+
+                self._button = button
+                self._strength = 0.0
+
+                self.setAttribute(
+                    Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                    True,
+                )
+
+                self.setAttribute(
+                    Qt.WidgetAttribute.WA_TranslucentBackground,
+                    True,
+                )
+
+                self.setGeometry(button.rect())
+
+                button.installEventFilter(self)
+
+                self.show()
+                self.raise_()
+
+            def eventFilter(self, obj, event):
+
+                if (
+                    obj is self._button
+                    and event.type()
+                    in (
+                        QEvent.Type.Resize,
+                        QEvent.Type.Show,
+                    )
+                ):
+                    self.setGeometry(
+                        self._button.rect()
+                    )
+                    self.raise_()
+
+                return False
+
+            def _get_strength(self):
+                return self._strength
+
+            def _set_strength(self, value):
+                self._strength = max(
+                    0.0,
+                    min(1.0, float(value)),
+                )
+                self.update()
+
+            strength = Property(
+                float,
+                _get_strength,
+                _set_strength,
+            )
+
+            def paintEvent(self, event):
+
+                if self._strength <= 0.001:
+                    return
+
+                painter = QPainter(self)
+
+                painter.setRenderHint(
+                    QPainter.RenderHint.Antialiasing,
+                    True,
+                )
+
+                painter.setBrush(
+                    Qt.BrushStyle.NoBrush
+                )
+
+                base_rect = QRectF(
+                    self.rect()
+                ).adjusted(
+                    0.75,
+                    0.75,
+                    -0.75,
+                    -0.75,
+                )
+
+                # Ayni glow her button icin:
+                # dis kenarda guclu, ice dogru yumusayan 5 katman.
+                layers = (
+                    (0.0, 235, 1.5),
+                    (1.2, 165, 1.5),
+                    (2.4, 105, 1.4),
+                    (3.6, 60, 1.3),
+                    (4.8, 28, 1.2),
+                )
+
+                for inset, alpha, width in layers:
+
+                    rect = base_rect.adjusted(
+                        inset,
+                        inset,
+                        -inset,
+                        -inset,
+                    )
+
+                    if (
+                        rect.width() <= 0.0
+                        or rect.height() <= 0.0
+                    ):
+                        continue
+
+                    color = QColor(
+                        47,
+                        128,
+                        255,
+                        int(
+                            alpha
+                            * self._strength
+                        ),
+                    )
+
+                    painter.setPen(
+                        QPen(
+                            color,
+                            width,
+                        )
+                    )
+
+                    painter.drawRoundedRect(
+                        rect,
+                        4.0,
+                        4.0,
+                    )
+
+                painter.end()
+
+        self._global_button_glow_overlays = {}
+        self._global_button_glow_animations = {}
+        self._global_button_glow_overlay_class = (
+            _ButtonGlowOverlay
+        )
+
+        buttons = tuple(
+            self.findChildren(QPushButton)
+        )
+
+        for button in buttons:
+
+            overlay = _ButtonGlowOverlay(
+                button
+            )
+
+            self._global_button_glow_overlays[
+                button
+            ] = overlay
+
+            button.pressed.connect(
+                lambda b=button:
+                    self._pulse_global_button_click_glow(
+                        b
+                    )
+            )
+
+        has_building_elements = any(
+            button.text().strip() == "Yapı Elemanları"
+            for button in buttons
+        )
+
+        print(
+            "UNIFORM INNER CLICK GLOW READY | "
+            f"buttons={len(buttons)} | "
+            f"building_elements={has_building_elements}"
+        )
+
+    def _pulse_global_button_click_glow(
+        self,
+        button,
+    ) -> None:
+
+        if not button.isEnabled():
+            return
+
+        from PySide6.QtCore import (
             QPropertyAnimation,
-            QParallelAnimationGroup,
             QEasingCurve,
         )
-        from PySide6.QtGui import QColor
 
-        effects = getattr(
+        overlay = getattr(
             self,
-            "_building_element_glow_effects",
+            "_global_button_glow_overlays",
             {},
-        )
+        ).get(button)
 
-        effect = effects.get(button)
-
-        if effect is None:
+        if overlay is None:
             return
 
         animations = getattr(
             self,
-            "_building_element_glow_animations",
+            "_global_button_glow_animations",
             {},
         )
 
-        old_animation = animations.get(button)
+        old_animation = animations.get(
+            button
+        )
 
         if old_animation is not None:
             old_animation.stop()
 
-        # Tiklandigi anda parlak mavi.
-        start_color = QColor(
-            47,
-            128,
-            255,
-            235,
-        )
-
-        end_color = QColor(
-            47,
-            128,
-            255,
-            0,
-        )
-
-        effect.setColor(start_color)
-        effect.setBlurRadius(18.0)
-
-        color_animation = QPropertyAnimation(
-            effect,
-            b"color",
+        # BUTUN BUTONLAR ICIN AYNI DEGERLER
+        animation = QPropertyAnimation(
+            overlay,
+            b"strength",
             self,
         )
 
-        color_animation.setDuration(1200)
-        color_animation.setStartValue(start_color)
-        color_animation.setEndValue(end_color)
+        animation.setDuration(1200)
+        animation.setStartValue(1.0)
+        animation.setEndValue(0.0)
 
-        color_animation.setEasingCurve(
+        animation.setEasingCurve(
             QEasingCurve.OutCubic
         )
 
-        blur_animation = QPropertyAnimation(
-            effect,
-            b"blurRadius",
-            self,
-        )
-
-        blur_animation.setDuration(1200)
-        blur_animation.setStartValue(18.0)
-        blur_animation.setEndValue(5.0)
-
-        blur_animation.setEasingCurve(
-            QEasingCurve.OutCubic
-        )
-
-        animation_group = QParallelAnimationGroup(
-            self
-        )
-
-        animation_group.addAnimation(
-            color_animation
-        )
-
-        animation_group.addAnimation(
-            blur_animation
-        )
-
-        self._building_element_glow_animations[
+        self._global_button_glow_animations[
             button
-        ] = animation_group
+        ] = animation
+
+        overlay.setProperty(
+            "strength",
+            1.0,
+        )
+
+        overlay.raise_()
 
         def cleanup():
+
             current = getattr(
                 self,
-                "_building_element_glow_animations",
+                "_global_button_glow_animations",
                 {},
             )
 
-            if current.get(button) is animation_group:
-                current.pop(button, None)
-
-            effect.setColor(
-                QColor(
-                    47,
-                    128,
-                    255,
-                    0,
+            if current.get(button) is animation:
+                current.pop(
+                    button,
+                    None,
                 )
+
+            overlay.setProperty(
+                "strength",
+                0.0,
             )
 
-            effect.setBlurRadius(16.0)
+        animation.finished.connect(
+            cleanup
+        )
 
-        animation_group.finished.connect(cleanup)
-        animation_group.start()
-
+        animation.start()
 
     def _toggle_building_elements_menu(
         self,
@@ -1081,6 +1183,230 @@ QPushButton {{
             )
 
         group.setVisible(bool(visible))
+
+    def _set_cad_menu_mode(
+        self,
+        plan_selected: bool,
+    ) -> None:
+        button = getattr(
+            self,
+            "_cad_menu_button",
+            None,
+        )
+
+        if button is None:
+            return
+
+        button.setText(
+            "Ana Menü"
+            if plan_selected
+            else "Mimari CAD Ekle"
+        )
+
+        create_3d_button = getattr(
+            self,
+            "_create_3d_button",
+            None,
+        )
+
+        if create_3d_button is not None:
+            create_3d_button.setVisible(
+                bool(plan_selected)
+            )
+
+
+    def _handle_cad_menu_button(self) -> None:
+        button = getattr(
+            self,
+            "_cad_menu_button",
+            None,
+        )
+
+        if (
+            button is not None
+            and button.text().strip() == "Ana Menü"
+        ):
+            self._return_to_loaded_cad_menu()
+            return
+
+        self.open_cad()
+
+
+    def _return_to_loaded_cad_menu(self) -> None:
+        """
+        Secilmis plan gorunumunden, CAD'in ilk yuklenen
+        tam proje gorunumune geri doner.
+        """
+
+        document = getattr(
+            self,
+            "_full_document",
+            None,
+        )
+
+        if document is None:
+            return
+
+        # Ana plan secim durumuna don.
+        self._selected_document = None
+
+        if hasattr(self, "_active_floor_document"):
+            self._active_floor_document = None
+
+        if hasattr(self, "_active_floor_bounds"):
+            self._active_floor_bounds = None
+
+        if hasattr(self, "_floor_selection_mode"):
+            self._floor_selection_mode = False
+
+        # Secim overlay durumlarini sifirla.
+        if hasattr(self, "_selected_door_candidates"):
+            self._selected_door_candidates = ()
+
+        if hasattr(self, "_selected_window_candidates"):
+            self._selected_window_candidates = ()
+
+        if hasattr(self, "_selected_wall_candidates"):
+            self._selected_wall_candidates = ()
+
+        if hasattr(self, "_door_overlay_visible"):
+            self._door_overlay_visible = False
+
+        if hasattr(self, "_window_overlay_visible"):
+            self._window_overlay_visible = False
+
+        if hasattr(self, "_wall_overlay_visible"):
+            self._wall_overlay_visible = False
+
+        # Kat ayarlari aciksa kapat.
+        floor_panel = getattr(
+            self,
+            "floor_panel",
+            None,
+        )
+
+        if floor_panel is not None:
+            floor_panel.setVisible(False)
+            floor_panel.setEnabled(False)
+
+        # Yapı Elemanları ana menude gorunmez.
+        if hasattr(
+            self,
+            "_set_plan_tool_buttons_visible",
+        ):
+            self._set_plan_tool_buttons_visible(False)
+
+        # Ilk CAD gorunumu.
+        self.view.set_plan_cleanup_active(False)
+        self.view.set_document(document)
+
+        # Yeni ana plan secilebilir.
+        if hasattr(self, "plan_btn"):
+            self.plan_btn.setEnabled(True)
+
+        self._set_cad_menu_mode(False)
+        self._set_clear_cad_button_visible(True)
+
+        self.statusBar().showMessage(
+            "Ana menü — yüklenen CAD projesi gösteriliyor"
+        )
+
+
+    def _apply_main_menu_disabled_text_style(self) -> None:
+        """
+        Ana ekrandaki pasif butonlarin sadece yazi rengini
+        soluk gosterir. Enabled durumdaki gorunum degismez.
+        """
+        from PySide6.QtWidgets import QPushButton
+
+        target_names = {
+            "Plan Seç",
+            "Görünüme Sığdır",
+            "CAD'i Temizle",
+        }
+
+        for button in self.findChildren(QPushButton):
+            if button.text().strip() not in target_names:
+                continue
+
+            current_style = button.styleSheet() or ""
+
+            rule = """
+QPushButton:disabled {
+    color: rgba(220, 220, 220, 75);
+}
+"""
+
+            if rule.strip() not in current_style:
+                button.setStyleSheet(
+                    current_style + "\n" + rule
+                )
+
+    def _set_main_cad_action_buttons_enabled(
+        self,
+        enabled: bool,
+    ) -> None:
+        """
+        Mimari CAD Ekle HARIC:
+        - Plan Seç
+        - Görünüme Sığdır
+        - CAD'i Temizle
+
+        bu uc buton ayni enabled/disabled durumunu kullanir.
+        """
+
+        from PySide6.QtWidgets import QPushButton
+
+        target_names = {
+            "Plan Seç",
+            "Görünüme Sığdır",
+            "CAD'i Temizle",
+        }
+
+        disabled_style = """
+QPushButton:disabled {
+    color: rgba(220, 220, 220, 75);
+}
+"""
+
+        for button in self.findChildren(QPushButton):
+            if button.text().strip() not in target_names:
+                continue
+
+            button.setEnabled(bool(enabled))
+
+            current_style = button.styleSheet() or ""
+
+            if disabled_style.strip() not in current_style:
+                button.setStyleSheet(
+                    current_style
+                    + "\n"
+                    + disabled_style
+                )
+
+
+    def _set_clear_cad_button_visible(
+        self,
+        visible: bool,
+    ) -> None:
+        from PySide6.QtWidgets import QPushButton
+
+        button = getattr(
+            self,
+            "_clear_cad_button",
+            None,
+        )
+
+        if button is None:
+            for candidate in self.findChildren(QPushButton):
+                if candidate.text().strip() == "CAD'i Temizle":
+                    button = candidate
+                    self._clear_cad_button = candidate
+                    break
+
+        if button is not None:
+            button.setVisible(bool(visible))
+
 
     def _begin_plan_selection(self) -> None:
         """
@@ -1236,6 +1562,8 @@ QPushButton {{
             return
 
         self._selected_document = selected
+        self._set_cad_menu_mode(True)
+        self._set_clear_cad_button_visible(False)
 
         # Ana plan secildi: analiz araclarini alt menu olarak ac.
         self._set_plan_tool_buttons_visible(True)
@@ -1388,6 +1716,8 @@ QPushButton {{
 
         self._current_path = path
         self._full_document = document
+        self._set_main_cad_action_buttons_enabled(True)
+        self._set_cad_menu_mode(False)
         self._selected_document = None
         self._confirmed_floors = []
 
@@ -1412,6 +1742,133 @@ QPushButton {{
         )
 
     def _create_3d(self) -> None:
+        confirmed = [
+            row
+            for row in (
+                getattr(
+                    self,
+                    "_confirmed_floors",
+                    (),
+                )
+                or ()
+            )
+            if isinstance(
+                row,
+                dict,
+            )
+        ]
+
+        # Onaylanmis katlar varsa CAD_to_3D_Max
+        # multi-floor transfer menu kullanilir.
+        if confirmed:
+            from PySide6.QtWidgets import (
+                QMenu,
+            )
+
+            from export.multi_floor_max_send import (
+                ordered_confirmed_floors,
+                start_floor_send,
+            )
+
+            try:
+                ordered = (
+                    ordered_confirmed_floors(
+                        confirmed
+                    )
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "Kat Aktarım Hatası",
+                    str(exc),
+                )
+                return
+
+            menu = QMenu(self)
+
+            menu.setStyleSheet(
+                """
+                QMenu {
+                    background-color: #1d1f20;
+                    color: #e6e6e6;
+                    border: 1px solid #343434;
+                    padding: 4px;
+                }
+
+                QMenu::item {
+                    padding: 6px 24px 6px 10px;
+                }
+
+                QMenu::item:selected {
+                    background-color: #2a2c2d;
+                }
+
+                QMenu::separator {
+                    height: 1px;
+                    background: #343434;
+                    margin: 4px 6px;
+                }
+                """
+            )
+
+            def launch(
+                names,
+            ):
+                try:
+                    start_floor_send(
+                        self,
+                        names,
+                    )
+                except Exception as exc:
+                    QMessageBox.critical(
+                        self,
+                        "3D Oluştur Hatası",
+                        str(exc),
+                    )
+
+            for floor in ordered:
+                floor_name = str(
+                    floor[
+                        "name"
+                    ]
+                )
+
+                action = menu.addAction(
+                    floor_name
+                )
+
+                action.triggered.connect(
+                    lambda checked=False,
+                    name=floor_name:
+                        launch(
+                            (name,)
+                        )
+                )
+
+            if len(ordered) > 0:
+                menu.addSeparator()
+
+            all_action = menu.addAction(
+                "Tüm Katları Gönder"
+            )
+
+            all_action.triggered.connect(
+                lambda checked=False:
+                    launch(None)
+            )
+
+            button = self.generate_3d_btn
+
+            menu.exec(
+                button.mapToGlobal(
+                    button.rect().bottomLeft()
+                )
+            )
+
+            return
+
+        # Hic kat onaylanmadiysa mevcut tek-plan
+        # transfer davranisi aynen korunur.
         document = self._selected_document
 
         if document is None:
@@ -1460,6 +1917,8 @@ QPushButton {{
         )
 
     def clear_cad(self) -> None:
+        self._set_main_cad_action_buttons_enabled(False)
+        self._set_cad_menu_mode(False)
         self._set_plan_tool_buttons_visible(False)
         self._confirmed_floors = []
         self._active_floor_document = None
