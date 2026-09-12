@@ -1,0 +1,30 @@
+============================================================
+3DCAD WALL EXPORT TOPOLOGY AUDIT
+============================================================
+
+Request file                  : C:\Users\yildi\Desktop\3Dcad\data\cache\max_bridge\visible_cad_request.txt
+Tolerance                     : 0.100 mm
+
+Payload splines               : 56
+Payload CLOSED flag           : 0
+Payload OPEN flag             : 56
+Payload vertices              : 129
+
+Consecutive duplicate vertex  : 0
+Redundant collinear vertex    : 1
+Explicit closure duplicate    : 0
+
+Graph nodes                   : 64
+Graph edges                   : 73
+Graph components              : 1
+Closed cycle components       : 0
+Open/branched components      : 1
+Degree-1 open endpoints       : 0
+Degree>2 branch nodes         : 8
+
+OPEN SPLINES:
+1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56
+
+FIRST REDUNDANT COLLINEAR VERTICES:
+  spline=5 vertex=3
+

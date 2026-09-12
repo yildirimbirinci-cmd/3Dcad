@@ -338,12 +338,36 @@ def _prepare_floor_package(
         ]
     )
 
-    x0, y0, x1, y1 = bounds
-
-    pivot_source = (
-        (x0 + x1) * 0.5,
-        (y0 + y1) * 0.5,
+    raw_pivot = floor.get(
+        "pivot_source"
     )
+
+    if (
+        not isinstance(
+            raw_pivot,
+            (tuple, list),
+        )
+        or len(raw_pivot) < 2
+    ):
+        raise RuntimeError(
+            name
+            + ": pivot belirlenmedi."
+        )
+
+    try:
+        pivot_source = (
+            float(raw_pivot[0]),
+            float(raw_pivot[1]),
+        )
+    except (
+        TypeError,
+        ValueError,
+        IndexError,
+    ) as exc:
+        raise RuntimeError(
+            name
+            + ": pivot bilgisi gecersiz."
+        ) from exc
 
     # EXACT SAME CURRENT 3Dcad DETECTOR ORDER:
     # door -> window -> wall
@@ -404,6 +428,13 @@ def _prepare_floor_package(
 
         "walls":
             walls,
+
+        # CAD3D_CONNECT_REQUEST_PIPELINE_V1
+        "doors":
+            doors,
+
+        "windows":
+            windows,
 
         "bounds":
             bounds,
@@ -849,7 +880,7 @@ def _send_next_floor(
         ],
     )
     print(
-        "AUTO PIVOT SOURCE:",
+        "USER PIVOT SOURCE:",
         package[
             "pivot_source"
         ],
@@ -861,6 +892,16 @@ def _send_next_floor(
                 "walls"
             ]
         ),
+    )
+
+    # CAD3D_CONNECT_REQUEST_PIPELINE_V1
+    from export.connect_levels_runtime import (
+        collect_connect_levels,
+    )
+
+    connect_levels_cm = collect_connect_levels(
+        window,
+        package,
     )
 
     try:
@@ -900,6 +941,9 @@ def _send_next_floor(
                 package[
                     "pivot_source"
                 ]
+            ),
+            connect_levels_cm=(
+                connect_levels_cm
             ),
         )
 

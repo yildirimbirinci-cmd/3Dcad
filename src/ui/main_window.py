@@ -52,6 +52,18 @@ class MainWindow(QMainWindow):
         self._set_cad_menu_mode(False)
         self._set_main_cad_action_buttons_enabled(False)
 
+        # CAD_TO_3D_MAX_PIVOT_SESSION_V1
+        self.floor_pivots = {}
+        self.ground_pivot_reference = None
+        self._active_floor_pivot = None
+        self._active_floor_pivot_snap = ""
+
+        # CAD3D_AUTO_FACADE_PORT_V1
+        self._cad3d_facade_preanalysis = None
+        self._cad3d_facade_packages = []
+        self.current_facade_match_result = None
+
+
     def _build_ui(self) -> None:
         root = QWidget()
         layout = QHBoxLayout(root)
@@ -78,6 +90,9 @@ class MainWindow(QMainWindow):
 
         self.view = CadGraphicsView()
         self.view.plan_area_selected.connect(self._apply_plan_selection)
+        self.view.pivot_committed.connect(
+            self._on_floor_pivot_committed
+        )
 
         load_btn = QPushButton("Mimari CAD Ekle")
         self._cad_menu_button = load_btn
@@ -87,6 +102,19 @@ class MainWindow(QMainWindow):
         self.plan_btn = QPushButton("Plan Seç")
         self.plan_btn.setEnabled(False)
         self.plan_btn.clicked.connect(self._begin_plan_selection)
+
+        # CAD3D_FACADE_MATCH_BUTTON_PRESELECTION_V2
+        self.facade_match_btn = QPushButton(
+            "Cephe Eşleştirme"
+        )
+
+        self.facade_match_btn.setEnabled(
+            False
+        )
+
+        self.facade_match_btn.clicked.connect(
+            self._run_facade_match_preselection
+        )
 
         self.interior_door_btn = QPushButton("İç Kapı")
 
@@ -119,6 +147,7 @@ class MainWindow(QMainWindow):
         self.generate_3d_btn.clicked.connect(self._create_3d)
 
         side.addWidget(load_btn)
+        side.addWidget(self.facade_match_btn)
         side.addWidget(self.plan_btn)
         side.addWidget(self.interior_door_btn)
         side.addWidget(self.wall_btn)
@@ -176,6 +205,13 @@ class MainWindow(QMainWindow):
 
         floor_layout.addWidget(wall_height_label)
         floor_layout.addWidget(self.wall_height_spin)
+
+        self.pivot_floor_btn = QPushButton("Pivot Belirle")
+        self.pivot_floor_btn.setEnabled(False)
+        self.pivot_floor_btn.clicked.connect(
+            self._start_floor_pivot_selection
+        )
+        floor_layout.addWidget(self.pivot_floor_btn)
 
         self.confirm_floor_btn = QPushButton("Planı Onayla")
         self.confirm_floor_btn.setObjectName("primary")
@@ -319,6 +355,1178 @@ class MainWindow(QMainWindow):
         self.view.set_floor_label(name)
 
 
+
+    # ========================================================
+    # CAD_to_3D_Max floor pivot controller
+    # ========================================================
+
+
+    # CAD3D_FLOOR_EDIT_REUSE_GHOST_PAN_V2
+    def _match_confirmed_floor_selection(
+        self,
+        bounds,
+    ):
+        """
+        CAD_to_3D_Max floor identity rule:
+
+        1) selection center inside existing floor -> strongest match
+        2) otherwise overlap area -> fallback match
+        3) no overlap -> new floor
+        """
+
+        if not (
+            isinstance(
+                bounds,
+                (tuple, list),
+            )
+            and len(bounds) == 4
+        ):
+            return None
+
+        try:
+            sx0, sy0, sx1, sy1 = (
+                float(value)
+                for value in bounds
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return None
+
+        if sx0 > sx1:
+            sx0, sx1 = sx1, sx0
+
+        if sy0 > sy1:
+            sy0, sy1 = sy1, sy0
+
+        selection_center_x = (
+            sx0 + sx1
+        ) * 0.5
+
+        selection_center_y = (
+            sy0 + sy1
+        ) * 0.5
+
+        best_index = None
+        best_record = None
+        best_score = 0.0
+
+        for index, record in enumerate(
+            getattr(
+                self,
+                "_confirmed_floors",
+                (),
+            )
+            or ()
+        ):
+            if not isinstance(
+                record,
+                dict,
+            ):
+                continue
+
+            existing_bounds = record.get(
+                "bounds"
+            )
+
+            if not (
+                isinstance(
+                    existing_bounds,
+                    (tuple, list),
+                )
+                and len(existing_bounds) == 4
+            ):
+                continue
+
+            try:
+                dx0, dy0, dx1, dy1 = (
+                    float(value)
+                    for value
+                    in existing_bounds
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if dx0 > dx1:
+                dx0, dx1 = dx1, dx0
+
+            if dy0 > dy1:
+                dy0, dy1 = dy1, dy0
+
+            ix0 = max(
+                sx0,
+                dx0,
+            )
+
+            iy0 = max(
+                sy0,
+                dy0,
+            )
+
+            ix1 = min(
+                sx1,
+                dx1,
+            )
+
+            iy1 = min(
+                sy1,
+                dy1,
+            )
+
+            intersection = (
+                max(
+                    0.0,
+                    ix1 - ix0,
+                )
+                *
+                max(
+                    0.0,
+                    iy1 - iy0,
+                )
+            )
+
+            center_inside = (
+                dx0
+                <= selection_center_x
+                <= dx1
+                and
+                dy0
+                <= selection_center_y
+                <= dy1
+            )
+
+            if (
+                not center_inside
+                and intersection <= 0.0
+            ):
+                continue
+
+            score = intersection
+
+            if center_inside:
+                score += 1.0e30
+
+            if score > best_score:
+                best_score = score
+                best_index = index
+                best_record = record
+
+        if best_record is None:
+            return None
+
+        return (
+            int(best_index),
+            best_record,
+        )
+
+
+    def _prepare_active_floor_pivot_state(
+        self,
+    ) -> None:
+        self._active_floor_pivot = None
+        self._active_floor_pivot_snap = ""
+
+        bounds = getattr(
+            self,
+            "_active_floor_bounds",
+            None,
+        )
+
+        if not bounds:
+            if hasattr(
+                self,
+                "pivot_floor_btn",
+            ):
+                self.pivot_floor_btn.setEnabled(
+                    False
+                )
+
+            self.view.clear_pivot()
+            return
+
+        match = (
+            self._match_confirmed_floor_selection(
+                bounds
+            )
+        )
+
+        existing = None
+
+        if match is not None:
+            _existing_index, existing = match
+
+            stored_bounds = existing.get(
+                "bounds"
+            )
+
+            if (
+                isinstance(
+                    stored_bounds,
+                    (tuple, list),
+                )
+                and len(stored_bounds) == 4
+            ):
+                self._active_floor_bounds = tuple(
+                    float(value)
+                    for value
+                    in stored_bounds
+                )
+
+            stored_document = existing.get(
+                "document"
+            )
+
+            if stored_document is not None:
+                self._active_floor_document = (
+                    stored_document
+                )
+
+            # ------------------------------------------------
+            # EXISTING FLOOR:
+            # restore ALL floor settings, not only pivot.
+            # ------------------------------------------------
+
+            if hasattr(
+                self,
+                "_refresh_floor_name_choices",
+            ):
+                self._refresh_floor_name_choices()
+
+            existing_name = str(
+                existing.get(
+                    "name",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if existing_name:
+                self.floor_name_combo.blockSignals(
+                    True
+                )
+
+                combo_index = (
+                    self.floor_name_combo.findText(
+                        existing_name
+                    )
+                )
+
+                if combo_index < 0:
+                    self.floor_name_combo.addItem(
+                        existing_name
+                    )
+
+                    combo_index = (
+                        self.floor_name_combo.findText(
+                            existing_name
+                        )
+                    )
+
+                if combo_index >= 0:
+                    self.floor_name_combo.setCurrentIndex(
+                        combo_index
+                    )
+
+                self.floor_name_combo.blockSignals(
+                    False
+                )
+
+            try:
+                self.interfloor_spin.setValue(
+                    float(
+                        existing.get(
+                            "interfloor_cm",
+                            self.interfloor_spin.value(),
+                        )
+                    )
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                pass
+
+            try:
+                self.wall_height_spin.setValue(
+                    float(
+                        existing.get(
+                            "wall_height_cm",
+                            self.wall_height_spin.value(),
+                        )
+                    )
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                pass
+
+            if existing_name:
+                self._update_floor_view_label(
+                    existing_name
+                )
+
+            pivot = existing.get(
+                "pivot_source"
+            )
+
+            if (
+                isinstance(
+                    pivot,
+                    (tuple, list),
+                )
+                and len(pivot) >= 2
+            ):
+                self._active_floor_pivot = (
+                    float(pivot[0]),
+                    float(pivot[1]),
+                )
+
+                self._active_floor_pivot_snap = str(
+                    existing.get(
+                        "pivot_snap_kind",
+                        "",
+                    )
+                    or ""
+                )
+
+        self.view.clear_pivot()
+
+        if self._active_floor_pivot is not None:
+            self.view.set_pivot_point(
+                self._active_floor_pivot,
+                self._active_floor_pivot_snap,
+            )
+
+        if hasattr(
+            self,
+            "pivot_floor_btn",
+        ):
+            self.pivot_floor_btn.setEnabled(
+                True
+            )
+
+
+    @staticmethod
+    def _primitive_xy(point):
+        if hasattr(point, "x") and hasattr(point, "y"):
+            return (
+                float(point.x),
+                float(point.y),
+            )
+
+        return (
+            float(point[0]),
+            float(point[1]),
+        )
+
+
+
+    # PIVOT_SPEED_AND_LARGE_ICON_V1
+    def _floor_pivot_reference_geometry(
+        self,
+        document=None,
+    ):
+        """
+        Pivot snap kaynagi:
+
+        FAST PATH:
+        Ana plan secilirken zaten hesaplanmis olan
+        _selected_wall_candidates kullanilir.
+
+        Bu nedenle Pivot Belirle tiklandiginda
+        door/window/wall detectorleri yeniden calismaz.
+
+        FALLBACK:
+        Eski davranis sadece hazir wall candidate yoksa kullanilir.
+        """
+
+        if document is None:
+            document = getattr(
+                self,
+                "_active_floor_document",
+                None,
+            )
+
+        if document is None:
+            return ()
+
+        bounds = getattr(
+            self,
+            "_active_floor_bounds",
+            None,
+        )
+
+        source_document = getattr(
+            self,
+            "_selected_document",
+            None,
+        )
+
+        wall_candidates = tuple(
+            getattr(
+                self,
+                "_selected_wall_candidates",
+                (),
+            )
+            or ()
+        )
+
+        # ----------------------------------------------------
+        # CACHE
+        # ----------------------------------------------------
+
+        bounds_key = None
+
+        if (
+            isinstance(
+                bounds,
+                (tuple, list),
+            )
+            and len(bounds) == 4
+        ):
+            bounds_key = tuple(
+                round(
+                    float(value),
+                    6,
+                )
+                for value in bounds
+            )
+
+        cache_key = (
+            id(source_document),
+            bounds_key,
+            len(wall_candidates),
+        )
+
+        if (
+            getattr(
+                self,
+                "_pivot_reference_cache_key",
+                None,
+            )
+            == cache_key
+        ):
+            cached = getattr(
+                self,
+                "_pivot_reference_cache",
+                None,
+            )
+
+            if cached:
+                return cached
+
+        # ----------------------------------------------------
+        # FAST PATH
+        # ----------------------------------------------------
+
+        if (
+            source_document is not None
+            and wall_candidates
+            and bounds_key is not None
+        ):
+            xmin, ymin, xmax, ymax = (
+                float(value)
+                for value in bounds
+            )
+
+            if xmin > xmax:
+                xmin, xmax = xmax, xmin
+
+            if ymin > ymax:
+                ymin, ymax = ymax, ymin
+
+            primitives = tuple(
+                getattr(
+                    source_document,
+                    "primitives",
+                    (),
+                )
+                or ()
+            )
+
+            reference = []
+            used_indices = set()
+
+            for wall in wall_candidates:
+                index = getattr(
+                    wall,
+                    "primitive_index",
+                    None,
+                )
+
+                if (
+                    index is None
+                    and isinstance(
+                        wall,
+                        dict,
+                    )
+                ):
+                    index = wall.get(
+                        "primitive_index"
+                    )
+
+                try:
+                    index = int(index)
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    continue
+
+                if (
+                    index < 0
+                    or index >= len(primitives)
+                    or index in used_indices
+                ):
+                    continue
+
+                primitive = primitives[
+                    index
+                ]
+
+                points = []
+
+                for raw_point in (
+                    getattr(
+                        primitive,
+                        "points",
+                        (),
+                    )
+                    or ()
+                ):
+                    try:
+                        point = (
+                            float(raw_point[0]),
+                            float(raw_point[1]),
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                        IndexError,
+                    ):
+                        continue
+
+                    points.append(
+                        point
+                    )
+
+                if len(points) < 2:
+                    continue
+
+                px_min = min(
+                    point[0]
+                    for point in points
+                )
+
+                px_max = max(
+                    point[0]
+                    for point in points
+                )
+
+                py_min = min(
+                    point[1]
+                    for point in points
+                )
+
+                py_max = max(
+                    point[1]
+                    for point in points
+                )
+
+                # Primitive aktif kat secim dikdortgeniyle
+                # hic kesismiyorsa bu katin snap havuzuna girmez.
+                if (
+                    px_max < xmin
+                    or px_min > xmax
+                    or py_max < ymin
+                    or py_min > ymax
+                ):
+                    continue
+
+                if (
+                    bool(
+                        getattr(
+                            primitive,
+                            "closed",
+                            False,
+                        )
+                    )
+                    and points[0]
+                    != points[-1]
+                ):
+                    points.append(
+                        points[0]
+                    )
+
+                reference.append(
+                    tuple(points)
+                )
+
+                used_indices.add(
+                    index
+                )
+
+            result = tuple(
+                reference
+            )
+
+            if result:
+                self._pivot_reference_cache_key = (
+                    cache_key
+                )
+
+                self._pivot_reference_cache = (
+                    result
+                )
+
+                return result
+
+        # ----------------------------------------------------
+        # FALLBACK
+        #
+        # Normal uygulama akisinda buraya dusmemeli.
+        # Detector kodlari DEGISTIRILMEZ.
+        # ----------------------------------------------------
+
+        doors = tuple(
+            detect_interior_doors(
+                document
+            )
+        )
+
+        window_result = detect_window_family(
+            document,
+            doors,
+        )
+
+        windows = tuple(
+            getattr(
+                window_result,
+                "windows",
+                (),
+            )
+            or ()
+        )
+
+        walls = tuple(
+            detect_walls(
+                document,
+                doors,
+                windows,
+            )
+        )
+
+        primitives = tuple(
+            getattr(
+                document,
+                "primitives",
+                (),
+            )
+            or ()
+        )
+
+        reference = []
+
+        for wall in walls:
+            index = getattr(
+                wall,
+                "primitive_index",
+                None,
+            )
+
+            try:
+                index = int(
+                    index
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if (
+                index < 0
+                or index >= len(primitives)
+            ):
+                continue
+
+            primitive = primitives[
+                index
+            ]
+
+            points = []
+
+            for raw_point in (
+                getattr(
+                    primitive,
+                    "points",
+                    (),
+                )
+                or ()
+            ):
+                try:
+                    points.append(
+                        (
+                            float(raw_point[0]),
+                            float(raw_point[1]),
+                        )
+                    )
+                except Exception:
+                    continue
+
+            if len(points) < 2:
+                continue
+
+            if (
+                bool(
+                    getattr(
+                        primitive,
+                        "closed",
+                        False,
+                    )
+                )
+                and points[0] != points[-1]
+            ):
+                points.append(
+                    points[0]
+                )
+
+            reference.append(
+                tuple(points)
+            )
+
+        result = tuple(
+            reference
+        )
+
+        self._pivot_reference_cache_key = (
+            cache_key
+        )
+
+        self._pivot_reference_cache = (
+            result
+        )
+
+        return result
+
+
+    def _floor_pivot_overlay_geometry(
+        self,
+        document,
+    ):
+        """
+        VISUAL ONLY.
+
+        Full selected floor CAD primitive geometry used for the
+        CAD_to_3D_Max style projected/ghost reference.
+
+        It is NOT used by:
+        - wall detection
+        - door detection
+        - window detection
+        - Max export
+        """
+
+        if document is None:
+            return ()
+
+        primitives = tuple(
+            getattr(
+                document,
+                "primitives",
+                (),
+            )
+            or ()
+        )
+
+        result = []
+
+        for primitive in primitives:
+            raw_points = tuple(
+                getattr(
+                    primitive,
+                    "points",
+                    (),
+                )
+                or ()
+            )
+
+            points = []
+
+            for raw_point in raw_points:
+                try:
+                    point = self._primitive_xy(
+                        raw_point
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    IndexError,
+                    AttributeError,
+                ):
+                    continue
+
+                points.append(
+                    (
+                        float(point[0]),
+                        float(point[1]),
+                    )
+                )
+
+            if len(points) < 2:
+                continue
+
+            if (
+                bool(
+                    getattr(
+                        primitive,
+                        "closed",
+                        False,
+                    )
+                )
+                and points[0] != points[-1]
+            ):
+                points.append(
+                    points[0]
+                )
+
+            result.append(
+                tuple(points)
+            )
+
+        return tuple(
+            result
+        )
+
+
+
+    def _start_floor_pivot_selection(
+        self,
+    ) -> None:
+        document = getattr(
+            self,
+            "_active_floor_document",
+            None,
+        )
+
+        bounds = getattr(
+            self,
+            "_active_floor_bounds",
+            None,
+        )
+
+        if (
+            document is None
+            or not bounds
+        ):
+            QMessageBox.warning(
+                self,
+                "Pivot Belirle",
+                "\u00d6nce Plan Se\u00e7 ile bir kat plan\u0131 se\u00e7in.",
+            )
+            return
+
+        # Active floor walls remain the snap source.
+        reference = (
+            self._floor_pivot_reference_geometry(
+                document
+            )
+        )
+
+        if not reference:
+            QMessageBox.warning(
+                self,
+                "Pivot Belirle",
+                "Aktif katta pivot i\u00e7in kullan\u0131labilecek "
+                "duvar geometrisi bulunamad\u0131.",
+            )
+            return
+
+        self.view.set_pivot_reference_geometry(
+            reference,
+            origin=None,
+        )
+
+        self.view.clear_pivot_ghost()
+
+        # ----------------------------------------------------
+        # CAD_to_3D_Max rule:
+        # FIRST CONFIRMED USER PIVOT is the master reference.
+        # ----------------------------------------------------
+
+        master_index = None
+        master_floor = None
+
+        confirmed = tuple(
+            getattr(
+                self,
+                "_confirmed_floors",
+                (),
+            )
+            or ()
+        )
+
+        for index, floor in enumerate(
+            confirmed
+        ):
+            if not isinstance(
+                floor,
+                dict,
+            ):
+                continue
+
+            pivot = floor.get(
+                "pivot_source"
+            )
+
+            master_document = floor.get(
+                "document"
+            )
+
+            if (
+                master_document is not None
+                and isinstance(
+                    pivot,
+                    (tuple, list),
+                )
+                and len(pivot) >= 2
+            ):
+                master_index = index
+                master_floor = floor
+                break
+
+        current_match = (
+            self._match_confirmed_floor_selection(
+                bounds
+            )
+        )
+
+        current_index = (
+            current_match[0]
+            if current_match is not None
+            else None
+        )
+
+        # The master floor itself does not need its own ghost.
+        if (
+            master_floor is not None
+            and master_index != current_index
+        ):
+            master_pivot = (
+                master_floor.get(
+                    "pivot_source"
+                )
+            )
+
+            master_document = (
+                master_floor.get(
+                    "document"
+                )
+            )
+
+            ghost_geometry = (
+                self._floor_pivot_overlay_geometry(
+                    master_document
+                )
+            )
+
+            if (
+                ghost_geometry
+                and isinstance(
+                    master_pivot,
+                    (tuple, list),
+                )
+                and len(master_pivot) >= 2
+            ):
+                self.view.set_pivot_ghost_geometry(
+                    ghost_geometry,
+                    (
+                        float(master_pivot[0]),
+                        float(master_pivot[1]),
+                    ),
+                )
+
+        if (
+            self._active_floor_pivot
+            is not None
+        ):
+            self.view.set_pivot_point(
+                self._active_floor_pivot,
+                self._active_floor_pivot_snap,
+            )
+
+        self.view.set_pivot_edit_enabled(
+            True
+        )
+
+        self.statusBar().showMessage(
+            "Pivot Belirle — sol mouse: pivot | "
+            "orta mouse: pan | wheel: zoom | "
+            "ilk pivot referans kat olarak izd\u00fc\u015f\u00fcmde g\u00f6sterilir"
+        )
+
+
+    def _on_floor_pivot_committed(
+        self,
+        x: float,
+        y: float,
+        snap_kind: str,
+    ) -> None:
+        self._active_floor_pivot = (
+            float(x),
+            float(y),
+        )
+
+        self._active_floor_pivot_snap = str(
+            snap_kind or ""
+        )
+
+        self.statusBar().showMessage(
+            "Pivot kaydedildi | "
+            f"X={x:.3f} Y={y:.3f} | "
+            f"Snap={self._active_floor_pivot_snap}"
+        )
+
+
+    def _save_pivot_records(self) -> None:
+        import json
+        from pathlib import Path
+        from export.multi_floor_max_send import (
+            floor_index_from_name,
+        )
+
+        source = str(
+            getattr(
+                self,
+                "_current_path",
+                "",
+            )
+            or ""
+        )
+
+        records = []
+        floor_pivots = {}
+
+        for floor in self._confirmed_floors:
+            pivot = floor.get(
+                "pivot_source"
+            )
+
+            if (
+                not isinstance(
+                    pivot,
+                    (tuple, list),
+                )
+                or len(pivot) < 2
+            ):
+                continue
+
+            floor_name = str(
+                floor.get(
+                    "name",
+                    "",
+                )
+                or ""
+            )
+
+            try:
+                floor_index = (
+                    floor_index_from_name(
+                        floor_name
+                    )
+                )
+            except Exception:
+                floor_index = None
+
+            key = (
+                source
+                + "|floor|"
+                + (
+                    str(floor_index)
+                    if floor_index is not None
+                    else floor_name
+                )
+            )
+
+            record = {
+                "key":
+                    key,
+                "source":
+                    source,
+                "floor_label":
+                    floor_name,
+                "floor_index":
+                    floor_index,
+                "floor_kind":
+                    "floor",
+                "pivot_x":
+                    float(pivot[0]),
+                "pivot_y":
+                    float(pivot[1]),
+                "snap_kind":
+                    str(
+                        floor.get(
+                            "pivot_snap_kind",
+                            "",
+                        )
+                        or ""
+                    ),
+                "master":
+                    bool(
+                        floor.get(
+                            "pivot_master",
+                            False,
+                        )
+                    ),
+            }
+
+            records.append(
+                record
+            )
+
+            floor_pivots[key] = record
+
+        self.floor_pivots = floor_pivots
+
+        payload = {
+            "version":
+                2,
+            "coordinate_space":
+                "cad_source_xy",
+            "alignment_rule":
+                "each_floor_reference_maps_to_common_xy",
+            "records":
+                records,
+        }
+
+        target = (
+            Path(__file__).resolve().parents[2]
+            / "data"
+            / "cache"
+            / "max_bridge"
+            / "pivot_records.json"
+        )
+
+        target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        target.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+
     def _confirm_floor_plan(self) -> None:
         """
         Aktif kat planinin bilgilerini hafizada tutar
@@ -357,6 +1565,26 @@ class MainWindow(QMainWindow):
             )
             return
 
+        pivot_source = getattr(
+            self,
+            "_active_floor_pivot",
+            None,
+        )
+
+        if (
+            not isinstance(
+                pivot_source,
+                (tuple, list),
+            )
+            or len(pivot_source) < 2
+        ):
+            QMessageBox.warning(
+                self,
+                "Kat Planı",
+                "Önce Pivot Belirle ile bu katın referans noktasını seçin.",
+            )
+            return
+
         floor_data = {
             "name": floor_name,
             "interfloor_cm": float(
@@ -370,6 +1598,21 @@ class MainWindow(QMainWindow):
                 for value in bounds
             ),
             "document": floor_document,
+            "pivot_source": (
+                float(pivot_source[0]),
+                float(pivot_source[1]),
+            ),
+            "pivot_snap_kind": str(
+                getattr(
+                    self,
+                    "_active_floor_pivot_snap",
+                    "",
+                )
+                or ""
+            ),
+            "pivot_master": (
+                floor_name == "Giriş Kat"
+            ),
         }
 
         # Fiziksel kat plani secim sinirlariyla tanimlanir.
@@ -404,6 +1647,32 @@ class MainWindow(QMainWindow):
                 floor_data
             )
 
+        if floor_data["pivot_master"]:
+            self.ground_pivot_reference = tuple(
+                floor_data["pivot_source"]
+            )
+
+        self._save_pivot_records()
+
+        # CAD3D_AUTO_FACADE_PORT_V1
+        # Confirmed floors are now the authoritative plan-window source.
+        try:
+            from cad.facade_runtime import (
+                refresh_facade_matches,
+            )
+
+            refresh_facade_matches(
+                self
+            )
+
+        except Exception as exc:
+            # Facade analysis must never invalidate an otherwise valid
+            # floor confirmation.
+            print(
+                "AUTO FACADE MATCH WARNING:",
+                repr(exc),
+            )
+
         # Kat adi sadece UI etiketi olarak mevcut view'a eklenir.
         # View crop edilmez ve diger onayli kat isimleri korunur.
         self.view.set_confirmed_floor_label(
@@ -414,6 +1683,14 @@ class MainWindow(QMainWindow):
         self._active_floor_document = None
         self._active_floor_bounds = None
         self._floor_selection_mode = False
+
+        self._active_floor_pivot = None
+        self._active_floor_pivot_snap = ""
+
+        if hasattr(self, "pivot_floor_btn"):
+            self.pivot_floor_btn.setEnabled(False)
+
+        self.view.set_pivot_edit_enabled(False)
 
         self.floor_panel.setVisible(False)
         self.floor_panel.setEnabled(False)
@@ -1214,6 +2491,19 @@ class MainWindow(QMainWindow):
                 bool(plan_selected)
             )
 
+        facade_button = getattr(
+            self,
+            "facade_match_btn",
+            None,
+        )
+
+        if facade_button is not None:
+            # Main CAD screen only.
+            # Never visible inside selected-plan workflow.
+            facade_button.setVisible(
+                not bool(plan_selected)
+            )
+
 
     def _handle_cad_menu_button(self) -> None:
         button = getattr(
@@ -1296,9 +2586,40 @@ class MainWindow(QMainWindow):
         ):
             self._set_plan_tool_buttons_visible(False)
 
+        self._active_floor_pivot = None
+        self._active_floor_pivot_snap = ""
+        self.view.clear_pivot()
+
         # Ilk CAD gorunumu.
         self.view.set_plan_cleanup_active(False)
         self.view.set_document(document)
+
+        # Stored facade registration survives Plan Sec.
+        facade_result = getattr(
+            self,
+            "_cad3d_facade_preanalysis",
+            None,
+        )
+
+        if isinstance(
+            facade_result,
+            dict,
+        ):
+            self.view.show_facade_match_preview(
+                facade_result
+            )
+
+        if hasattr(
+            self,
+            "facade_match_btn",
+        ):
+            self.facade_match_btn.setVisible(
+                True
+            )
+
+            self.facade_match_btn.setEnabled(
+                True
+            )
 
         # Yeni ana plan secilebilir.
         if hasattr(self, "plan_btn"):
@@ -1408,6 +2729,104 @@ QPushButton:disabled {
             button.setVisible(bool(visible))
 
 
+
+    # CAD3D_FACADE_MATCH_BUTTON_PRESELECTION_V2
+    def _run_facade_match_preselection(
+        self,
+    ) -> None:
+        if self._full_document is None:
+            QMessageBox.warning(
+                self,
+                "Cephe Eşleştirme",
+                "Önce Mimari CAD Ekleyin.",
+            )
+            return
+
+        # This button belongs ONLY to the full-CAD screen.
+        if self._selected_document is not None:
+            return
+
+        self.statusBar().showMessage(
+            "Cepheler ve plan yönleri eşleştiriliyor..."
+        )
+
+        try:
+            from cad.facade_runtime import (
+                preanalyse_facades,
+            )
+
+            result = (
+                preanalyse_facades(
+                    self
+                )
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Cephe Eşleştirme",
+                str(exc),
+            )
+
+            self.statusBar().showMessage(
+                "Cephe eşleştirme başarısız."
+            )
+
+            return
+
+        main_plan = result.get(
+            "main_plan"
+        )
+
+        facades = list(
+            result.get(
+                "elevation_facades",
+                [],
+            )
+            or []
+        )
+
+        matches = list(
+            result.get(
+                "matches",
+                [],
+            )
+            or []
+        )
+
+        if not main_plan:
+            QMessageBox.warning(
+                self,
+                "Cephe Eşleştirme",
+                "Ana plan otomatik bulunamadı.",
+            )
+            return
+
+        if not facades:
+            QMessageBox.warning(
+                self,
+                "Cephe Eşleştirme",
+                "Cephe çizimi otomatik bulunamadı.",
+            )
+            return
+
+        # Visual numbering exists ONLY on full CAD screen.
+        label_count = (
+            self.view
+            .show_facade_match_preview(
+                result
+            )
+        )
+
+        self.statusBar().showMessage(
+            "Cephe Eşleştirme | "
+            f"{len(facades)} cephe | "
+            f"{len(matches)} plan yönü eşleşti | "
+            f"{label_count} numara gösteriliyor | "
+            "veri kaydedildi"
+        )
+
+
     def _begin_plan_selection(self) -> None:
         """
         Iki kesin mod:
@@ -1456,6 +2875,24 @@ QPushButton:disabled {
         self.view.set_document(self._full_document)
         self.view.begin_plan_selection()
 
+        # CAD3D_FACADE_LABEL_PERSIST_PLAN_SELECT_V1
+        # set_document()/begin_plan_selection() rebuilds the scene.
+        # Restore ONLY the existing visual labels; do not re-run
+        # facade analysis or alter its result.
+        facade_result = getattr(
+            self,
+            "_cad3d_facade_preanalysis",
+            None,
+        )
+
+        if isinstance(
+            facade_result,
+            dict,
+        ):
+            self.view.show_facade_match_preview(
+                facade_result
+            )
+
         self.statusBar().showMessage(
             "Plan alanını seçin."
         )
@@ -1489,6 +2926,78 @@ QPushButton:disabled {
                 self._floor_selection_mode = False
                 return
 
+            # CAD3D_FLOOR_EDIT_REUSE_GHOST_PAN_V2
+            requested_bounds = (
+                float(xmin),
+                float(ymin),
+                float(xmax),
+                float(ymax),
+            )
+
+            existing_match = (
+                self._match_confirmed_floor_selection(
+                    requested_bounds
+                )
+            )
+
+            if existing_match is not None:
+                (
+                    _existing_index,
+                    existing_floor,
+                ) = existing_match
+
+                stored_bounds = existing_floor.get(
+                    "bounds"
+                )
+
+                stored_document = existing_floor.get(
+                    "document"
+                )
+
+                if (
+                    stored_document is not None
+                    and isinstance(
+                        stored_bounds,
+                        (tuple, list),
+                    )
+                    and len(stored_bounds) == 4
+                ):
+                    self._floor_selection_mode = False
+
+                    self._active_floor_document = (
+                        stored_document
+                    )
+
+                    self._active_floor_bounds = tuple(
+                        float(value)
+                        for value
+                        in stored_bounds
+                    )
+
+                    self._prepare_active_floor_pivot_state()
+
+                    self.floor_panel.setVisible(
+                        True
+                    )
+
+                    self.floor_panel.setEnabled(
+                        True
+                    )
+
+                    if hasattr(
+                        self,
+                        "_refresh_floor_name_choices",
+                    ):
+                        self._refresh_floor_name_choices()
+
+                    self.statusBar().showMessage(
+                        "Kay\u0131tl\u0131 kat plan\u0131 "
+                        "a\u00e7\u0131ld\u0131 — mevcut bilgiler "
+                        "d\u00fczenlenebilir."
+                    )
+
+                    return
+
             floor_document = crop_document(
                 self._selected_document,
                 xmin,
@@ -1518,6 +3027,8 @@ QPushButton:disabled {
                 float(xmax),
                 float(ymax),
             )
+
+            self._prepare_active_floor_pivot_state()
 
             self.floor_panel.setVisible(True)
             self.floor_panel.setEnabled(True)
@@ -1562,6 +3073,9 @@ QPushButton:disabled {
             return
 
         self._selected_document = selected
+        self._active_floor_pivot = None
+        self._active_floor_pivot_snap = ""
+        self.view.clear_pivot()
         self._set_cad_menu_mode(True)
         self._set_clear_cad_button_visible(False)
 
@@ -1580,6 +3094,10 @@ QPushButton:disabled {
         self.view.set_document(selected)
 
         self._prepare_plan_objects()
+
+        # CAD3D_FACADE_MATCH_BUTTON_PRESELECTION_V2
+        # Cephe eslestirme verisi Plan Sec oncesinde uretilir.
+        # Burada yeniden analiz edilmez ve mevcut veri korunur.
 
         self.window_btn.setEnabled(True)
 
@@ -1721,10 +3239,24 @@ QPushButton:disabled {
         self._selected_document = None
         self._confirmed_floors = []
 
+        # CAD3D_AUTO_FACADE_PORT_V1
+        self._cad3d_facade_preanalysis = None
+        self._cad3d_facade_packages = []
+        self.current_facade_match_result = None
+
         self.view.set_plan_cleanup_active(False)
         self.view.set_document(document)
 
         self.plan_btn.setEnabled(True)
+
+        self.facade_match_btn.setEnabled(
+            True
+        )
+
+        self.facade_match_btn.setVisible(
+            True
+        )
+
         self.window_btn.setEnabled(False)
 
 
@@ -1917,6 +3449,21 @@ QPushButton:disabled {
         )
 
     def clear_cad(self) -> None:
+        self.floor_pivots = {}
+        self.ground_pivot_reference = None
+        self._active_floor_pivot = None
+        self._active_floor_pivot_snap = ""
+
+        # CAD3D_AUTO_FACADE_PORT_V1
+        self._cad3d_facade_preanalysis = None
+        self._cad3d_facade_packages = []
+        self.current_facade_match_result = None
+
+        if hasattr(self, "pivot_floor_btn"):
+            self.pivot_floor_btn.setEnabled(False)
+
+        self.view.clear_pivot()
+
         self._set_main_cad_action_buttons_enabled(False)
         self._set_cad_menu_mode(False)
         self._set_plan_tool_buttons_visible(False)
@@ -1935,9 +3482,23 @@ QPushButton:disabled {
         self._full_document = None
         self._selected_document = None
 
+        self.view.clear_facade_match_preview()
         self.view.clear_document()
 
         self.plan_btn.setEnabled(False)
+
+        if hasattr(
+            self,
+            "facade_match_btn",
+        ):
+            self.facade_match_btn.setEnabled(
+                False
+            )
+
+            self.facade_match_btn.setVisible(
+                True
+            )
+
         self.window_btn.setEnabled(False)
 
 
